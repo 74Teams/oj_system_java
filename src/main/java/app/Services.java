@@ -10,6 +10,10 @@ import java.util.regex.Pattern;
 
 public class Services {
     private static final String MODEL_ID = "gemini-2.5-flash";
+    private static final int DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+    private static final int MAX_CODE_OUTPUT_TOKENS = 8192;
+    private static final int MAX_CODE_ATTEMPTS = 3;
+    private static final int CONTINUE_CONTEXT_CHARS = 2000;
     private final String apiKey = "AIzaSyAiOlpAOMmKrfGFW77jHmqILInOH0OchGI";
     private final Client client;
     public Services(){
@@ -25,21 +29,28 @@ public class Services {
 
     public String generateCode(String problemText, String type, String language, Result analysis) {
         String prompt = buildCodePrompt(problemText, type, language, analysis);
-        Result r = GenerationContent(prompt);
-        return r.fullAI;
+        return generateCodeWithRetries(prompt, language);
     }
 
     private Result GenerationContent(String prompt){
+        String rawText = generateContentText(prompt, DEFAULT_MAX_OUTPUT_TOKENS);
+        return parseToResult(rawText);
+    }
+
+    private String generateContentText(String prompt, int maxOutputTokens) {
         GenerateContentResponse response;
         try {
-            GenerateContentConfig cfg = GenerateContentConfig.builder().temperature(0.2f).maxOutputTokens(4096).build();
+            GenerateContentConfig cfg = GenerateContentConfig.builder()
+                    .temperature(0.2f)
+                    .maxOutputTokens(maxOutputTokens)
+                    .build();
             response = client.models.generateContent(MODEL_ID, prompt, cfg);
-            String rawText = response.text();
-            return parseToResult(rawText);
+            return response.text();
         } catch (Exception e) {
             throw new RuntimeException("Lỗi kết nối API Gemini: " + e.getMessage(), e);
         }
     }
+
 
     private Result parseToResult(String text) {
         Result r = new Result();
@@ -123,6 +134,7 @@ public class Services {
         }
         sb.append("\nCHỈ TRẢ VỀ MÃ NGUỒN, KHÔNG GIẢI THÍCH GÌ THÊM NGOÀI CODE.\n");
         sb.append("\nNẾU ĐỀ BÀI KHÔNG HỢP LỆ THÌ TRẢ VỀ KHÔNG THỂ TẠO CODE VÌ ĐỂ BÀI KHÔNG HỢP LỆ\n");
+        sb.append("\nKết thúc mã nguồn bằng một dòng comment theo ngôn ngữ đã chọn để đánh dấu kết thúc.\n");
         sb.append("---\n");
         sb.append("Đề bài:\n").append(problem).append("\n");
         return sb.toString();
@@ -132,6 +144,74 @@ public class Services {
         Pattern p = Pattern.compile(field + ":\\s*(.*?)(?=\\n[A-Z_]+:|$)", Pattern.DOTALL);
         Matcher m = p.matcher(text);
         return m.find() ? m.group(1).trim() : "";
+    }
+
+    private String generateCodeWithRetries(String prompt, String language) {
+        String endMarker = getEndMarker(language);
+        String basePrompt = prompt + "\n\nKết thúc mã nguồn bằng dòng: " + endMarker + "\n";
+        String combined = "";
+        String currentPrompt = basePrompt;
+
+        for (int attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
+            String rawText = generateContentText(currentPrompt, MAX_CODE_OUTPUT_TOKENS);
+            String normalized = normalizeCodeResponse(rawText);
+            combined = combined.isEmpty() ? normalized : combined + "\n" + normalized;
+
+            if (containsEndMarker(combined, endMarker)) {
+                return stripEndMarkerLine(combined, endMarker).trim();
+            }
+
+            currentPrompt = buildContinuePrompt(combined, endMarker);
+        }
+
+        return combined.trim();
+    }
+
+    private String buildContinuePrompt(String currentCode, String endMarker) {
+        String tail = currentCode.length() > CONTINUE_CONTEXT_CHARS
+                ? currentCode.substring(currentCode.length() - CONTINUE_CONTEXT_CHARS)
+                : currentCode;
+        StringBuilder sb = new StringBuilder();
+        sb.append("Bạn vừa trả về mã nguồn bị cắt.\n");
+        sb.append("Dưới đây là đoạn cuối để lấy ngữ cảnh:\n");
+        sb.append(tail).append("\n\n");
+        sb.append("Hãy tiếp tục từ đúng chỗ dở dang, KHÔNG lặp lại phần đã có.\n");
+        sb.append("Chỉ trả về phần còn thiếu của mã nguồn, không giải thích, không bọc trong code block.\n");
+        sb.append("Kết thúc bằng dòng: ").append(endMarker).append("\n");
+        return sb.toString();
+    }
+
+    private String normalizeCodeResponse(String text) {
+        String trimmed = text == null ? "" : text.trim();
+        if (trimmed.startsWith("```")) {
+            int firstNewline = trimmed.indexOf('\n');
+            int lastFence = trimmed.lastIndexOf("```");
+            if (firstNewline > -1 && lastFence > firstNewline) {
+                return trimmed.substring(firstNewline + 1, lastFence).trim();
+            }
+        }
+        return trimmed;
+    }
+
+    private boolean containsEndMarker(String text, String endMarker) {
+        return text != null && text.contains(endMarker);
+    }
+
+    private String stripEndMarkerLine(String text, String endMarker) {
+        String escaped = Pattern.quote(endMarker);
+        return text.replaceAll("(?m)^\\s*" + escaped + "\\s*$", "").trim();
+    }
+
+    private String getEndMarker(String language) {
+        String comment;
+        if (language == null) {
+            comment = "//";
+        } else if (language.toLowerCase().contains("python")) {
+            comment = "#";
+        } else {
+            comment = "//";
+        }
+        return comment + " END_OF_CODE";
     }
 
     public static class Result{
