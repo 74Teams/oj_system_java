@@ -1,70 +1,82 @@
 package app;
 
 import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
 
 public class CodeRunner {
-    ProcessBuilder compileBuilder;
-    private String RunCode(String language, String input, String code){
-        try {
-            switch (language){
-                case "C++17":
-                    compileCpp(code);
-                    break;
-                case "Python":
-                    compilePython();
-                    break;
-                case "Java":
-                    compileJava();
-                    break;
-            }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+    public List<RunResult> runCppTestcases(String code, List<Services.Testcase> testcases) {
+        if (code == null || code.isBlank()) {
+            throw new IllegalArgumentException("Code trống.");
         }
-        return "";
-    }
-    private String compileCpp(String code, String input) throws IOException, InterruptedException {
-        File dir = new File("temp");
+        if (testcases == null || testcases.isEmpty()) {
+            throw new IllegalArgumentException("Không có testcase để chạy.");
+        }
+        File dir = new File("temp_run_" + System.currentTimeMillis());
         dir.mkdir();
-        File source = new File(dir, "main.cpp");
+        try {
+            File source = new File(dir, "main.cpp");
+            try (FileWriter writer = new FileWriter(source)) {
+                writer.write(code);
+            }
 
-        try (FileWriter writer = new FileWriter(source)) {
-            writer.write(code);
+            ProcessBuilder compileBuilder =
+                    new ProcessBuilder(
+                            "g++",
+                            "main.cpp",
+                            "-o",
+                            "main.exe"
+                    );
+            compileBuilder.directory(dir);
+            Process compileProcess = compileBuilder.start();
+            String compileOut = readStream(compileProcess.getInputStream());
+            String compileError = readStream(compileProcess.getErrorStream());
+            int compileExit = compileProcess.waitFor();
+            File exe = new File(dir, "main.exe");
+            if (compileExit != 0 || !compileError.isEmpty() || !exe.exists()) {
+                StringBuilder err = new StringBuilder("Compile Error:\n");
+                if (!compileError.isEmpty()) err.append(compileError);
+                if (!compileOut.isEmpty()) err.append(compileOut);
+                if (!exe.exists()) err.append("\nKhông tìm thấy file main.exe sau khi biên dịch.");
+                throw new RuntimeException(err.toString().trim());
+            }
+
+            List<RunResult> results = new ArrayList<>();
+            for (Services.Testcase tc : testcases) {
+                results.add(runCppCase(exe, tc));
+            }
+            return results;
+        } catch (Exception e) {
+            throw new RuntimeException(e.getMessage(), e);
+        } finally {
+            deleteDirectory(dir);
         }
+    }
 
-        ProcessBuilder compileBuilder =
-                new ProcessBuilder(
-                        "g++",
-                        "main.cpp",
-                        "-o",
-                        "main.exe"
-                );
-        compileBuilder.directory(dir);
-        Process compileProcess = compileBuilder.start();
-        String compileError = readStream(compileProcess.getErrorStream());
-        compileProcess.waitFor();
-        if (!compileError.isEmpty()) {
-            return "Compile Error:\n" + compileError;
-        }
-        ProcessBuilder runBuilder = new ProcessBuilder("main.exe");
-
-        runBuilder.directory(dir);
+    private RunResult runCppCase(File exe, Services.Testcase tc) throws IOException, InterruptedException {
+        ProcessBuilder runBuilder = new ProcessBuilder(exe.getAbsolutePath());
+        runBuilder.directory(exe.getParentFile());
 
         Process runProcess = runBuilder.start();
+        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(runProcess.getOutputStream()))) {
+            String input = tc == null || tc.input == null ? "" : tc.input;
+            writer.write(input);
+            writer.newLine();
+            writer.flush();
+        }
 
-        // ===== GỬI INPUT =====
-        BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(runProcess.getOutputStream()));
-
-        writer.write(input);
-        writer.newLine();
-
-        writer.flush();
-        writer.close();
-
+        long start = System.nanoTime();
         String output = readStream(runProcess.getInputStream());
         String error = readStream(runProcess.getErrorStream());
+        int exit = runProcess.waitFor();
+        long durationMs = (System.nanoTime() - start) / 1_000_000;
 
-        runProcess.waitFor();
-        return output + error;
+        RunResult rs = new RunResult();
+        rs.stdout = output;
+        rs.stderr = error;
+        rs.exitCode = exit;
+        rs.durationMs = durationMs;
+        return rs;
     }
 
     private String readStream(InputStream stream) throws IOException {
@@ -97,5 +109,12 @@ public class CodeRunner {
         }
 
         file.delete();
+    }
+
+    public static class RunResult {
+        public String stdout = "";
+        public String stderr = "";
+        public int exitCode = 0;
+        public long durationMs = 0;
     }
 }

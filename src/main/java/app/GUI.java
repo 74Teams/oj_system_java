@@ -2,6 +2,7 @@ package app;
 
 import app.Interface.aCallBack;
 import app.Interface.bCallBack;
+import app.Interface.cCallBack;
 
 import javax.swing.*;
 import javax.swing.border.*;
@@ -10,6 +11,8 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.File;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
 import javax.swing.filechooser.FileNameExtensionFilter;
 public class GUI extends JFrame {
     // --- Màu sắc ---
@@ -48,12 +51,20 @@ public class GUI extends JFrame {
     private JButton uploadBtn;
     private JButton generateCodeBtn;
     private JButton genTestcaseBtn;
+    private JButton runTestcaseBtn;
+    private JButton runAllBtn;
+    private JButton addTestcaseBtn;
+    private JButton updateTestcaseBtn;
+    private JButton saveApiKeyBtn;
     private JComboBox<String> testcaseTypeCombo;
     private JLabel statusLabel;
     private JSpinner numSpinner;
+    private JPasswordField apiKeyField;
 
     private Controller controller;
+    private CodeRunner codeRunner;
     private Services.Result lastAnalysisResult;
+    private List<Services.Testcase> testcases = new ArrayList<>();
     public GUI(){
         setTitle("74OJ - Bài tập lớn JAVA");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
@@ -68,6 +79,7 @@ public class GUI extends JFrame {
         add(StatusBar(), BorderLayout.SOUTH);
 
         controller = new Controller();
+        codeRunner = new CodeRunner();
         Listener();
     }
 
@@ -152,6 +164,80 @@ public class GUI extends JFrame {
                 }
             });
         });
+
+        genTestcaseBtn.addActionListener(e -> {
+            String text = problemArea.getText().trim();
+            if (text.isEmpty() || text.startsWith("Dán đề bài")) {
+                JOptionPane.showMessageDialog(this, "Vui lòng nhập đề bài!", "Thông báo", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            int count = (Integer) numSpinner.getValue();
+            String type = (String) testcaseTypeCombo.getSelectedItem();
+
+            genTestcaseBtn.setEnabled(false);
+            statusLabel.setText("Đang sinh testcase...");
+            statusLabel.setForeground(C_YELLOW);
+            progressBar.setIndeterminate(true);
+            tabs.setSelectedIndex(1);
+
+            controller.generateTestcaseAsync(text, count, type, lastAnalysisResult, new cCallBack() {
+                @Override
+                public void onSuccess(List<Services.Testcase> cases) {
+                    testcases = cases;
+                    tableModel.setRowCount(0);
+                    for (int i = 0; i < cases.size(); i++) {
+                        Services.Testcase tc = cases.get(i);
+                        String rowType = tc.type.isBlank() ? type : tc.type;
+                        tableModel.addRow(new Object[]{i + 1, rowType, "OK", "-"});
+                    }
+                    if (!cases.isEmpty()) {
+                        testcaseTable.setRowSelectionInterval(0, 0);
+                        inputArea.setText(cases.get(0).input);
+                        outputArea.setText(cases.get(0).output);
+                    }
+                    statusLabel.setText("Đã sinh testcase");
+                    statusLabel.setForeground(C_GREEN);
+                    genTestcaseBtn.setEnabled(true);
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(100);
+                }
+
+                @Override
+                public void onError(String error) {
+                    statusLabel.setText("Lỗi sinh testcase");
+                    statusLabel.setForeground(C_RED);
+                    genTestcaseBtn.setEnabled(true);
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(0);
+                    JOptionPane.showMessageDialog(GUI.this, error, "Lỗi", JOptionPane.ERROR_MESSAGE);
+                }
+            });
+        });
+
+
+        runTestcaseBtn.addActionListener(e -> runCurrentTestcases());
+        if (runAllBtn != null) {
+            runAllBtn.addActionListener(e -> runCurrentTestcases());
+        }
+
+        addTestcaseBtn.addActionListener(e -> addManualTestcase());
+        updateTestcaseBtn.addActionListener(e -> updateSelectedTestcase());
+
+        saveApiKeyBtn.addActionListener(e -> {
+            String key = new String(apiKeyField.getPassword()).trim();
+            if (key.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "Vui lòng nhập API key!", "Thông báo", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            try {
+                controller.setApiKey(key);
+                statusLabel.setText("● Đã lưu API key");
+                statusLabel.setForeground(C_GREEN);
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, ex.getMessage(), "Lỗi", JOptionPane.ERROR_MESSAGE);
+            }
+        });
     }
 
 
@@ -173,15 +259,23 @@ public class GUI extends JFrame {
         left.add(label("Ngôn ngữ:"));
         langCombo = combo(new String[]{"C++17", "Java", "Python 3"});
         left.add(langCombo);
+
+        left.add(label("API Key:"));
+        apiKeyField = new JPasswordField();
+        apiKeyField.setFont(F_NORMAL);
+        apiKeyField.setPreferredSize(new Dimension(160, 28));
+        left.add(apiKeyField);
+        saveApiKeyBtn = btn("Lưu", C_GREEN);
+        left.add(saveApiKeyBtn);
         bar.add(BorderLayout.WEST, left);
 
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         right.setOpaque(false);
         analyzeBtn = btn("Phân tích AI", C_PRIMARY);
         right.add(analyzeBtn);
-        right.add(btn("Sinh Testcase", C_GREEN));
-        right.add(btn("Chạy tất cả", new Color(139, 92, 246)));
-        right.add(btn("Xuất PDF", new Color(189, 66, 1)));
+        runAllBtn = btn("Chạy tất cả", new Color(139, 92, 246));
+        right.add(runAllBtn);
+        right.add(btn("Lưu Database", new Color(189, 66, 1)));
         bar.add(right, BorderLayout.EAST);
         return bar;
     }
@@ -252,7 +346,6 @@ public class GUI extends JFrame {
         tabs.addTab("Phân tích",  buildAnalysisTab());
         tabs.addTab("Testcase",   buildTestcaseTab());
         tabs.addTab("Code",       buildCodeTab());
-        tabs.addTab("Kết quả",    buildVerdictTab());
         return tabs;
     }
 
@@ -298,6 +391,10 @@ public class GUI extends JFrame {
         toolbar.add(testcaseTypeCombo);
         genTestcaseBtn = btn("Sinh", C_PRIMARY);
         toolbar.add(genTestcaseBtn);
+        addTestcaseBtn = btn("Thêm TC", new Color(59, 130, 246));
+        toolbar.add(addTestcaseBtn);
+        updateTestcaseBtn = btn("Lưu sửa", new Color(15, 118, 110));
+        toolbar.add(updateTestcaseBtn);
         toolbar.add(btn("Xuất file", C_GREEN));
         toolbar.add(btn("Xóa", C_RED));
         panel.add(toolbar, BorderLayout.NORTH);
@@ -312,6 +409,33 @@ public class GUI extends JFrame {
         tableModel = new DefaultTableModel(cols, 0) {
             public boolean isCellEditable(int r, int c) { return false; }
         };
+
+        testcaseTable = new JTable(tableModel);
+        testcaseTable.setFont(F_NORMAL);
+        testcaseTable.setRowHeight(28);
+        testcaseTable.setShowGrid(false);
+        testcaseTable.setIntercellSpacing(new Dimension(0, 1));
+        testcaseTable.getTableHeader().setFont(F_BOLD);
+        testcaseTable.getTableHeader().setBackground(new Color(248, 249, 251));
+        testcaseTable.getColumnModel().getColumn(0).setMaxWidth(35);
+        testcaseTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        testcaseTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
+            public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean foc, int r, int c) {
+                super.getTableCellRendererComponent(t, v, sel, foc, r, c);
+                setBackground(sel ? new Color(219, 234, 254) : (r % 2 == 0 ? C_WHITE : new Color(250, 251, 252)));
+                setForeground(C_TEXT);
+                setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
+                return this;
+            }
+        });
+
+        JPanel tableCard = card();
+        tableCard.setLayout(new BorderLayout(0, 4));
+        tableCard.setBorder(BorderFactory.createCompoundBorder(tableCard.getBorder(),
+                BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+        tableCard.add(new JLabel("Danh sách testcase") {{ setFont(F_BOLD); setForeground(C_TEXT); }}, BorderLayout.NORTH);
+        tableCard.add(scrollPane(testcaseTable), BorderLayout.CENTER);
+        split.setLeftComponent(tableCard);
 
 
         JPanel preview = new JPanel(new GridLayout(2, 1, 0, 8));
@@ -341,8 +465,145 @@ public class GUI extends JFrame {
         preview.add(outputCard);
         split.setRightComponent(preview);
 
+        testcaseTable.getSelectionModel().addListSelectionListener(e -> {
+            if (e.getValueIsAdjusting()) return;
+            int row = testcaseTable.getSelectedRow();
+            if (row >= 0 && row < testcases.size()) {
+                Services.Testcase tc = testcases.get(row);
+                inputArea.setText(tc.input);
+                outputArea.setText(tc.output);
+            }
+        });
+
         panel.add(split, BorderLayout.CENTER);
         return panel;
+    }
+
+    private void addManualTestcase() {
+        String input = inputArea.getText().trim();
+        String output = outputArea.getText().trim();
+        if (input.isEmpty() || output.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Input/Output không được trống.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        Services.Testcase tc = new Services.Testcase();
+        tc.type = (String) testcaseTypeCombo.getSelectedItem();
+        tc.input = input;
+        tc.output = output;
+        testcases.add(tc);
+        int index = testcases.size();
+        tableModel.addRow(new Object[]{index, tc.type, "Thủ công", "-"});
+        testcaseTable.setRowSelectionInterval(index - 1, index - 1);
+        statusLabel.setText("Đã thêm testcase thủ công");
+        statusLabel.setForeground(C_GREEN);
+    }
+
+    private void updateSelectedTestcase() {
+        int row = testcaseTable.getSelectedRow();
+        if (row < 0 || row >= testcases.size()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng chọn testcase để sửa.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String input = inputArea.getText().trim();
+        String output = outputArea.getText().trim();
+        if (input.isEmpty() || output.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Input/Output không được trống.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        Services.Testcase tc = testcases.get(row);
+        tc.input = input;
+        tc.output = output;
+        tableModel.setValueAt("Đã sửa", row, 2);
+        statusLabel.setText("Đã cập nhật testcase");
+        statusLabel.setForeground(C_GREEN);
+    }
+
+    private void runCurrentTestcases() {
+        if (testcases == null || testcases.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Chưa có testcase để chạy.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String lang = (String) langCombo.getSelectedItem();
+        if (lang == null || !lang.startsWith("C++")) {
+            JOptionPane.showMessageDialog(this, "Hiện tại chỉ hỗ trợ chạy C++.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String code = codeArea.getText().trim();
+        if (code.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng nhập code C++ trước khi chạy.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        runTestcaseBtn.setEnabled(false);
+        if (runAllBtn != null) runAllBtn.setEnabled(false);
+        statusLabel.setText("Đang chạy testcase...");
+        statusLabel.setForeground(C_YELLOW);
+        progressBar.setIndeterminate(true);
+        tabs.setSelectedIndex(2);
+        compileArea.setText("Đang chạy testcases...\n");
+
+        new SwingWorker<List<CodeRunner.RunResult>, Void>() {
+            @Override
+            protected List<CodeRunner.RunResult> doInBackground() {
+                return codeRunner.runCppTestcases(code, testcases);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    List<CodeRunner.RunResult> results = get();
+                    StringBuilder log = new StringBuilder();
+                    int pass = 0;
+                    for (int i = 0; i < results.size(); i++) {
+                        CodeRunner.RunResult rs = results.get(i);
+                        Services.Testcase tc = testcases.get(i);
+                        String expected = normalizeOutput(tc.output);
+                        String actual = normalizeOutput(rs.stdout);
+                        String status;
+                        if (rs.exitCode != 0 || (rs.stderr != null && !rs.stderr.isBlank())) {
+                            status = "RE";
+                        } else if (expected.equals(actual)) {
+                            status = "AC";
+                            pass++;
+                        } else {
+                            status = "WA";
+                        }
+                        tableModel.setValueAt(status, i, 2);
+                        tableModel.setValueAt(rs.durationMs + " ms", i, 3);
+
+                        log.append("TC ").append(i + 1).append(": ").append(status)
+                                .append(" (").append(rs.durationMs).append(" ms)").append("\n");
+                        if (status.equals("WA")) {
+                            log.append("Expected:\n").append(tc.output).append("\n")
+                               .append("Actual:\n").append(rs.stdout).append("\n");
+                        }
+                        if (status.equals("RE")) {
+                            if (rs.stderr != null && !rs.stderr.isBlank()) {
+                                log.append("Error:\n").append(rs.stderr).append("\n");
+                            }
+                        }
+                        log.append("---\n");
+                    }
+                    compileArea.setText(log.toString());
+                    statusLabel.setText("Đã chạy xong " + pass + "/" + results.size() + " testcase");
+                    statusLabel.setForeground(pass == results.size() ? C_GREEN : C_YELLOW);
+                } catch (Exception ex) {
+                    compileArea.setText("Lỗi khi chạy testcase:\n" + ex.getMessage());
+                    statusLabel.setText("Lỗi khi chạy testcase");
+                    statusLabel.setForeground(C_RED);
+                } finally {
+                    runTestcaseBtn.setEnabled(true);
+                    if (runAllBtn != null) runAllBtn.setEnabled(true);
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(100);
+                }
+            }
+        }.execute();
+    }
+
+    private String normalizeOutput(String text) {
+        if (text == null) return "";
+        return text.replace("\r\n", "\n").trim();
     }
 
     private JPanel buildCodeTab() {
@@ -358,7 +619,8 @@ public class GUI extends JFrame {
         generateCodeBtn = btn("Sinh Code AI", C_PRIMARY);
         toolbar.add(generateCodeBtn);
         toolbar.add(btn("Biên dịch", new Color(234, 88, 12)));
-        toolbar.add(btn("Chạy TC", C_GREEN));
+        runTestcaseBtn = btn("Chạy TC", C_GREEN);
+        toolbar.add(runTestcaseBtn);
         panel.add(toolbar, BorderLayout.NORTH);
 
         JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
@@ -395,64 +657,7 @@ public class GUI extends JFrame {
         return panel;
     }
 
-    private JPanel buildVerdictTab() {
-        JPanel panel = new JPanel(new BorderLayout(0, 10));
-        panel.setBorder(BorderFactory.createEmptyBorder(10, 8, 10, 8));
-        panel.setBackground(C_BG);
 
-        JPanel stats = new JPanel(new GridLayout(1, 5, 8, 0));
-        stats.setOpaque(false);
-        stats.setPreferredSize(new Dimension(0, 72));
-        stats.add(statCard("Tổng TC",  "0",  C_TEXT));
-        stats.add(statCard("AC",    "0",  new Color(22, 163, 74)));
-        stats.add(statCard("WA",    "0",   C_RED));
-        stats.add(statCard("TLE",   "0",   C_YELLOW));
-        stats.add(statCard("MLE",   "0",   new Color(139, 92, 246)));
-        panel.add(stats, BorderLayout.NORTH);
-
-        String[] cols = {"TC", "Input", "AC", "WA", "TLE", "Thời gian"};
-        DefaultTableModel vm = new DefaultTableModel(cols, 0) {
-            public boolean isCellEditable(int r, int c) { return false; }
-        };
-
-        JTable vt = new JTable(vm);
-        vt.setFont(F_NORMAL);
-        vt.setRowHeight(28);
-        vt.setShowGrid(false);
-        vt.setIntercellSpacing(new Dimension(0, 1));
-        vt.getTableHeader().setFont(F_BOLD);
-        vt.getTableHeader().setBackground(new Color(248, 249, 251));
-        vt.getColumnModel().getColumn(0).setMaxWidth(35);
-        vt.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
-            public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean foc, int r, int c) {
-                super.getTableCellRendererComponent(t, v, sel, foc, r, c);
-                setBackground(sel ? new Color(219, 234, 254) : (r % 2 == 0 ? C_WHITE : new Color(250, 251, 252)));
-                setForeground(C_TEXT);
-                setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
-                String s = v == null ? "" : v.toString();
-                if (s.contains("✅")) setForeground(new Color(22, 163, 74));
-                else if (s.contains("❌")) setForeground(C_RED);
-                else if (s.contains("⏱")) setForeground(C_YELLOW);
-                return this;
-            }
-        });
-
-        JPanel tableCard = card();
-        tableCard.setLayout(new BorderLayout(0, 6));
-        tableCard.setBorder(BorderFactory.createCompoundBorder(tableCard.getBorder(),
-                BorderFactory.createEmptyBorder(8, 10, 8, 10)));
-        tableCard.add(new JLabel("Bảng kết quả") {{ setFont(F_BOLD); setForeground(C_TEXT); }}, BorderLayout.NORTH);
-        tableCard.add(scrollPane(vt), BorderLayout.CENTER);
-
-        JPanel bottom = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
-        bottom.setOpaque(false);
-        bottom.add(btn("Xuất báo cáo", C_PRIMARY));
-        bottom.add(btn("Sinh thêm TC", C_YELLOW));
-        tableCard.add(bottom, BorderLayout.SOUTH);
-        panel.add(tableCard, BorderLayout.CENTER);
-
-        return panel;
-    }
 
     private JPanel StatusBar() {
         JPanel bar = new JPanel(new BorderLayout());
