@@ -263,7 +263,6 @@ public class Services {
                 if(!clean.isEmpty()) r.constraints.add(clean);
             }
         }
-
         return r;
     }
     public String buildAnalyzePrompt(String problemText){
@@ -342,7 +341,6 @@ public class Services {
             if (!rs.constraints.isEmpty()) {
                 sb.append("- Ràng buộc: ").append(String.join("; ", rs.constraints)).append("\n");
             }
-
         }
         sb.append("\n");
         sb.append("NGÔN NGỮ: ").append(language).append("\n");
