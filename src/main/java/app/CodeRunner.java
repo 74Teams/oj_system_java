@@ -12,9 +12,7 @@ public class CodeRunner {
     private static final Pattern CLASS_PATTERN = Pattern.compile("\\bclass\\s+([A-Za-z_][A-Za-z0-9_]*)");
 
     public List<RunResult> runTestcases(String language, String code, List<Services.Testcase> testcases) {
-        if (language == null || language.isBlank()) {
-            throw new IllegalArgumentException("Chưa chọn ngôn ngữ.");
-        }
+        
         String lang = language.toLowerCase();
         if (lang.contains("c++")) {
             return runCppTestcases(code, testcases);
@@ -24,6 +22,9 @@ public class CodeRunner {
         }
         if (lang.contains("java")) {
             return runJavaTestcases(code, testcases);
+        }
+        if (language == null || language.isBlank()) {
+            throw new IllegalArgumentException("Chưa chọn ngôn ngữ.");
         }
         throw new IllegalArgumentException("Ngôn ngữ chưa hỗ trợ: " + language);
     }
