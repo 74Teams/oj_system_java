@@ -4,6 +4,7 @@ import app.Interface.aCallBack;
 import app.Interface.bCallBack;
 import app.Interface.cCallBack;
 
+import java.io.File;
 import java.util.List;
 
 import javax.swing.*;
@@ -64,6 +65,24 @@ public class Controller {
                 try {
                     cb.onSuccess(get());
                 } catch (Exception e) {
+                    cb.onError(e.getMessage());
+                }
+            }
+        }.execute();
+    }
+
+    public void readFileWithOCR(File file, bCallBack cb){
+        new SwingWorker<String, Void>(){
+            @Override
+            protected String doInBackground() throws Exception {
+                return services.FileToText(file);
+            }
+
+            @Override
+            protected void done(){
+                try {
+                    cb.onSuccess(get());
+                } catch (Exception e){
                     cb.onError(e.getMessage());
                 }
             }

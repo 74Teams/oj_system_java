@@ -3,6 +3,13 @@ package app;
 import com.google.genai.Client;
 import com.google.genai.types.GenerateContentConfig;
 import com.google.genai.types.GenerateContentResponse;
+import net.sourceforge.tess4j.Tesseract;
+import net.sourceforge.tess4j.TesseractException;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.time.LocalDate;
 
@@ -15,8 +22,12 @@ public class Services {
     private static final int MAX_CODE_OUTPUT_TOKENS = 12288;
     private static final int MAX_CODE_ATTEMPTS = 2;
     private static final int CONTINUE_CONTEXT_CHARS = 4000;
-    private static final int MAX_TESTCASE_ATTEMPTS = 2;
-    private static final int TESTCASE_EXISTING_SAMPLE_LIMIT = 8;
+    private static final int MAX_TESTCASE_ATTEMPTS = 12;
+    private static final int TESTCASE_EXISTING_SAMPLE_LIMIT = 20;
+    private static final int MAX_TESTCASE_BATCH_SIZE = 30;
+    private static final int MIN_TESTCASE_BATCH_SIZE = 6;
+    private static final int MAX_TESTCASE_NO_PROGRESS_STREAK = 3;
+    private static final List<String> REQUIRED_STRENGTHS = List.of("WEAK", "MEDIUM", "STRONG");
     private static final int MAX_REQUESTS_PER_DAY = 20;
     private String apiKey = "";
     private Client client;
@@ -65,22 +76,100 @@ public class Services {
         if (cached != null) return new ArrayList<>(cached);
         List<Testcase> collected = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        for (int attempt = 0; attempt < MAX_TESTCASE_ATTEMPTS && collected.size() < count; attempt++) {
-            int remaining = count - collected.size();
-            String prompt = attempt == 0
-                    ? buildTestcasePrompt(problemText, remaining, type, analysis)
-                    : buildTestcaseContinuePrompt(problemText, remaining, type, analysis, collected);
+        List<String> missingStrengths = new ArrayList<>(getMissingStrengths(collected, count));
+        int noProgressStreak = 0;
+        int batchSize = Math.min(MAX_TESTCASE_BATCH_SIZE, count);
+        int poolLimit = Math.max(count, Math.min(count * 3, count + 30));
+        for (int attempt = 0; attempt < MAX_TESTCASE_ATTEMPTS && (collected.size() < count || !missingStrengths.isEmpty()); attempt++) {
+            int requestCount;
+            if (collected.size() < count) {
+                int remaining = count - collected.size();
+                requestCount = Math.min(remaining, batchSize);
+            } else {
+                requestCount = Math.max(missingStrengths.size(), MIN_TESTCASE_BATCH_SIZE / 2);
+            }
+            String prompt = collected.isEmpty()
+                    ? buildTestcasePrompt(problemText, requestCount, type, analysis)
+                    : buildTestcaseContinuePrompt(problemText, requestCount, type, analysis, collected, missingStrengths);
             String rawText = generateContentText(prompt, DEFAULT_MAX_OUTPUT_TOKENS);
-            mergeTestcases(collected, parseTestcases(rawText), seen, count);
+            int before = collected.size();
+            mergeTestcases(collected, parseTestcases(rawText), seen, poolLimit);
+            int added = collected.size() - before;
+            missingStrengths = getMissingStrengths(collected, count);
+            if (added == 0) {
+                noProgressStreak++;
+                batchSize = Math.max(MIN_TESTCASE_BATCH_SIZE, batchSize / 2);
+                if (noProgressStreak >= MAX_TESTCASE_NO_PROGRESS_STREAK) {
+                    break;
+                }
+            } else {
+                noProgressStreak = 0;
+                if (added >= requestCount / 2) {
+                    batchSize = Math.min(MAX_TESTCASE_BATCH_SIZE, batchSize + 4);
+                }
+            }
         }
         if (collected.isEmpty()) {
             throw new RuntimeException("Không thể sinh testcase hợp lệ từ phản hồi AI.");
         }
-        if (collected.size() < count) {
+        List<Testcase> balanced = selectBalancedTestcases(collected, count);
+        if (balanced.size() < count) {
             throw new RuntimeException("Không đủ testcase. Đã sinh " + collected.size() + "/" + count + ". Vui lòng thử lại.");
         }
-        testcaseCache.put(cacheKey, new ArrayList<>(collected));
-        return collected;
+        List<String> missingAfterBalance = getMissingStrengths(balanced, count);
+        if (!missingAfterBalance.isEmpty()) {
+            throw new RuntimeException("Chưa đủ mức độ testcase (yếu/vừa/mạnh). Thiếu: " + String.join(", ", missingAfterBalance) + ". Vui lòng thử lại.");
+        }
+        testcaseCache.put(cacheKey, new ArrayList<>(balanced));
+        return balanced;
+    }
+
+    public String FileToText(File file){
+        if (file == null) {
+            throw new IllegalArgumentException("Chưa chọn file.");
+        }
+        if (!file.exists() || !file.isFile()) {
+            throw new IllegalArgumentException("File không tồn tại hoặc không hợp lệ: " + file.getAbsolutePath());
+        }
+        String extension = getExtension(file.getName());
+        if ("txt".equals(extension)) {
+            try {
+                return Files.readString(file.toPath());
+            } catch (IOException e) {
+                throw new RuntimeException("Không thể đọc file văn bản: " + e.getMessage(), e);
+            }
+        }
+        if (!Set.of("png", "jpg", "jpeg").contains(extension)) {
+            throw new IllegalArgumentException("Định dạng file không hỗ trợ. Chỉ hỗ trợ: png, jpg, jpeg, txt.");
+        }
+
+        Tesseract tesseract = new Tesseract();
+        try {
+            tesseract.setDatapath(resolveOcrDataPath().toString());
+            tesseract.setLanguage("eng+vie");
+            return tesseract.doOCR(file);
+        } catch (TesseractException e) {
+            throw new RuntimeException("OCR thất bại: " + e.getMessage(), e);
+        }
+    }
+
+    private Path resolveOcrDataPath() {
+        Path current = Path.of("").toAbsolutePath();
+        for (int i = 0; i < 5 && current != null; i++) {
+            Path candidate = current.resolve("ocr_data");
+            if (Files.isDirectory(candidate)) {
+                return candidate;
+            }
+            current = current.getParent();
+        }
+        throw new IllegalStateException("Không tìm thấy thư mục ocr_data.");
+    }
+
+    private String getExtension(String fileName) {
+        if (fileName == null) return "";
+        int idx = fileName.lastIndexOf('.');
+        if (idx < 0 || idx == fileName.length() - 1) return "";
+        return fileName.substring(idx + 1).toLowerCase(Locale.ROOT);
     }
 
     private Result GenerationContent(String prompt){
@@ -201,6 +290,11 @@ public class Services {
     public String buildTestcasePrompt(String problemText, int count, String type, Result rs) {
         StringBuilder sb = new StringBuilder();
         sb.append("Sinh ").append(count).append(" testcase. Type: ").append(type).append("\n");
+        sb.append("Bắt buộc đủ đúng ").append(count).append(" testcase, không thiếu.\n");
+        if (count >= 3) {
+            sb.append("Bắt buộc có đủ 3 mức độ testcase theo STRENGTH: WEAK, MEDIUM, STRONG (ít nhất mỗi mức 1 case).\n");
+            sb.append("Ưu tiên tỉ lệ gần đúng: 30% WEAK, 40% MEDIUM, 30% STRONG.\n");
+        }
         if (rs != null && !rs.constraints.isEmpty()) {
             sb.append("Constraints: ").append(String.join("; ", rs.constraints)).append("\n");
         }
@@ -209,22 +303,27 @@ public class Services {
             sb.append("Sample Out:\n").append(rs.sampleOutput.trim()).append("\n");
         }
         sb.append("Format:\n");
-        sb.append("TESTCASE_BEGIN\nTYPE:\nINPUT:\n...\nOUTPUT:\n...\nNOTE:\nTESTCASE_END\n");
+        sb.append("TESTCASE_BEGIN\nTYPE:\nSTRENGTH: <WEAK|MEDIUM|STRONG>\nINPUT:\n...\nOUTPUT:\n...\nNOTE:\nTESTCASE_END\n");
         sb.append("Output khớp input, không rỗng, input<=2000 ký tự.\n");
         sb.append("---\n");
         sb.append("Đề bài:\n").append(problemText).append("\n");
         return sb.toString();
     }
 
-    public String buildTestcaseContinuePrompt(String problemText, int count, String type, Result rs, List<Testcase> existing) {
+    public String buildTestcaseContinuePrompt(String problemText, int count, String type, Result rs, List<Testcase> existing, List<String> missingStrengths) {
         StringBuilder sb = new StringBuilder();
         sb.append("Thiếu testcase. Sinh thêm ").append(count).append(" case KHÔNG trùng.\n");
+        sb.append("Bắt buộc đủ đúng ").append(count).append(" case mới trong lần trả lời này.\n");
         sb.append("Type: ").append(type).append("\n");
+        if (!missingStrengths.isEmpty()) {
+            sb.append("Đang thiếu các mức STRENGTH sau, ưu tiên sinh đúng các mức này: ")
+                    .append(String.join(", ", missingStrengths)).append(".\n");
+        }
         if (rs != null && !rs.constraints.isEmpty()) {
             sb.append("Constraints: ").append(String.join("; ", rs.constraints)).append("\n");
         }
         sb.append("Đã có:\n").append(formatExistingTestcases(existing)).append("\n");
-        sb.append("Format:\nTESTCASE_BEGIN\nTYPE:\nINPUT:\n...\nOUTPUT:\n...\nNOTE:\nTESTCASE_END\n");
+        sb.append("Format:\nTESTCASE_BEGIN\nTYPE:\nSTRENGTH: <WEAK|MEDIUM|STRONG>\nINPUT:\n...\nOUTPUT:\n...\nNOTE:\nTESTCASE_END\n");
         sb.append("Output khớp input, không rỗng, input<=2000 ký tự.\n");
         sb.append("---\n");
         sb.append("Đề bài:\n").append(problemText).append("\n");
@@ -287,10 +386,14 @@ public class Services {
             String block = m.group(1).trim();
             Testcase tc = new Testcase();
             tc.type = extractField(block, "TYPE");
+            tc.strength = normalizeStrengthValue(extractField(block, "STRENGTH"));
             tc.input = extractField(block, "INPUT");
             tc.output = extractField(block, "OUTPUT");
             tc.note = extractField(block, "NOTE");
             if (!tc.input.isBlank() || !tc.output.isBlank()) {
+                if (tc.strength.isBlank()) {
+                    tc.strength = inferStrengthFromInput(tc.input);
+                }
                 list.add(tc);
             }
         }
@@ -303,6 +406,9 @@ public class Services {
             if (tc.input == null) tc.input = "";
             if (tc.output == null) tc.output = "";
             if (tc.input.isBlank() || tc.output.isBlank()) continue;
+            if (tc.strength == null || tc.strength.isBlank()) {
+                tc.strength = inferStrengthFromInput(tc.input);
+            }
             String key = normalizeTestcaseKey(tc);
             if (seen.add(key)) {
                 target.add(tc);
@@ -321,11 +427,76 @@ public class Services {
         for (int i = start; i < existing.size(); i++) {
             Testcase tc = existing.get(i);
             sb.append("CASE ").append(i + 1).append("\n");
+            sb.append("STRENGTH: ").append(tc.strength == null ? "" : tc.strength).append("\n");
             sb.append("IN:\n").append(tc.input == null ? "" : tc.input.trim()).append("\n");
             sb.append("OUT:\n").append(tc.output == null ? "" : tc.output.trim()).append("\n");
             sb.append("---\n");
         }
         return sb.toString();
+    }
+
+    private List<Testcase> selectBalancedTestcases(List<Testcase> pool, int count) {
+        if (pool == null || pool.isEmpty() || count <= 0) return new ArrayList<>();
+        List<Testcase> selected = new ArrayList<>();
+        Set<String> used = new HashSet<>();
+        if (count >= 3) {
+            for (String strength : REQUIRED_STRENGTHS) {
+                for (Testcase tc : pool) {
+                    if (!strength.equals(tc.strength)) continue;
+                    String key = normalizeTestcaseKey(tc);
+                    if (used.add(key)) {
+                        selected.add(tc);
+                        break;
+                    }
+                }
+            }
+        }
+        for (Testcase tc : pool) {
+            if (selected.size() >= count) break;
+            String key = normalizeTestcaseKey(tc);
+            if (used.add(key)) {
+                selected.add(tc);
+            }
+        }
+        if (selected.size() > count) {
+            return new ArrayList<>(selected.subList(0, count));
+        }
+        return selected;
+    }
+
+    private List<String> getMissingStrengths(List<Testcase> cases, int requestedCount) {
+        List<String> missing = new ArrayList<>();
+        if (requestedCount < 3) return missing;
+        Set<String> present = new HashSet<>();
+        if (cases != null) {
+            for (Testcase tc : cases) {
+                String strength = normalizeStrengthValue(tc.strength);
+                if (!strength.isBlank()) present.add(strength);
+            }
+        }
+        for (String strength : REQUIRED_STRENGTHS) {
+            if (!present.contains(strength)) missing.add(strength);
+        }
+        return missing;
+    }
+
+    private String normalizeStrengthValue(String raw) {
+        if (raw == null) return "";
+        String normalized = raw.trim().toUpperCase(Locale.ROOT);
+        if (normalized.contains("WEAK") || normalized.contains("YEU")) return "WEAK";
+        if (normalized.contains("MEDIUM") || normalized.contains("VUA")) return "MEDIUM";
+        if (normalized.contains("STRONG") || normalized.contains("MANH")) return "STRONG";
+        return "";
+    }
+
+    private String inferStrengthFromInput(String input) {
+        String value = input == null ? "" : input.trim();
+        if (value.isBlank()) return "MEDIUM";
+        int length = value.length();
+        int lines = value.split("\\R+").length;
+        if (length <= 60 && lines <= 3) return "WEAK";
+        if (length >= 300 || lines >= 12) return "STRONG";
+        return "MEDIUM";
     }
 
     private String generateCodeWithRetries(String prompt, String language) {
@@ -396,6 +567,8 @@ public class Services {
         return comment + " END_OF_CODE";
     }
 
+
+
     public static class Result{
         public String problemType = "";
         public String algorithm   = "";
@@ -436,6 +609,7 @@ public class Services {
 
     public static class Testcase {
         public String type = "";
+        public String strength = "";
         public String input = "";
         public String output = "";
         public String note = "";

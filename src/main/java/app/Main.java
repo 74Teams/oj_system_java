@@ -1,6 +1,7 @@
 package app;
 
 import javax.swing.*;
+import java.io.File;
 
 public class Main {
     static void main() {
@@ -14,7 +15,5 @@ public class Main {
             GUI gui = new GUI();
             gui.setVisible(true);
         });
-
-        Database.getConnection();
     }
 }

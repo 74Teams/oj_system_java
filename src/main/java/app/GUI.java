@@ -10,9 +10,13 @@ import javax.swing.table.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import javax.swing.filechooser.FileNameExtensionFilter;
 public class GUI extends JFrame {
     // --- Màu sắc ---
@@ -55,6 +59,7 @@ public class GUI extends JFrame {
     private JButton runAllBtn;
     private JButton addTestcaseBtn;
     private JButton updateTestcaseBtn;
+    private JButton exportTestcaseBtn;
     private JButton saveApiKeyBtn;
     private JComboBox<String> testcaseTypeCombo;
     private JLabel statusLabel;
@@ -65,6 +70,7 @@ public class GUI extends JFrame {
     private CodeRunner codeRunner;
     private Services.Result lastAnalysisResult;
     private List<Services.Testcase> testcases = new ArrayList<>();
+    private final Map<String, StrengthRunSummary> strengthRuns = new HashMap<>();
     public GUI(){
         setTitle("74OJ - Bài tập lớn JAVA");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
@@ -185,10 +191,14 @@ public class GUI extends JFrame {
                 @Override
                 public void onSuccess(List<Services.Testcase> cases) {
                     testcases = cases;
+                    clearStrengthEvidence();
                     tableModel.setRowCount(0);
                     for (int i = 0; i < cases.size(); i++) {
                         Services.Testcase tc = cases.get(i);
                         String rowType = tc.type.isBlank() ? type : tc.type;
+                        if (tc.strength != null && !tc.strength.isBlank()) {
+                            rowType = rowType + " / " + tc.strength;
+                        }
                         tableModel.addRow(new Object[]{i + 1, rowType, "OK", "-"});
                     }
                     if (!cases.isEmpty()) {
@@ -215,6 +225,33 @@ public class GUI extends JFrame {
             });
         });
 
+        uploadBtn.addActionListener(e -> {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setDialogTitle("Chọn file đề bài (ảnh hoặc văn bản)");
+            chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+            chooser.setDialogType(JFileChooser.OPEN_DIALOG);
+            chooser.setAcceptAllFileFilterUsed(false);
+            chooser.addChoosableFileFilter(new FileNameExtensionFilter("Image files (*.png, *.jpg, *.jpeg)", "png", "jpg", "jpeg"));
+            chooser.addChoosableFileFilter(new FileNameExtensionFilter("Text files (*.txt)", "txt"));
+            chooser.setFileFilter(new FileNameExtensionFilter("Supported files (*.png, *.jpg, *.jpeg, *.txt)", "png", "jpg", "jpeg", "txt"));
+            if (chooser.showOpenDialog(GUI.this) == JFileChooser.APPROVE_OPTION) {
+                File file =  chooser.getSelectedFile();
+                controller.readFileWithOCR(file, new bCallBack() {
+                    @Override
+                    public void onSuccess(String code) {
+                        problemArea.setText(code);
+                        statusLabel.setText("Đọc file thành công: " + file.getName());
+                    }
+
+                    @Override
+                    public void onError(String error) {
+                        problemArea.setText(error);
+                        statusLabel.setText("Lỗi đọc file");
+                    }
+                });
+            }
+        });
+
 
         runTestcaseBtn.addActionListener(e -> runCurrentTestcases());
         if (runAllBtn != null) {
@@ -223,6 +260,7 @@ public class GUI extends JFrame {
 
         addTestcaseBtn.addActionListener(e -> addManualTestcase());
         updateTestcaseBtn.addActionListener(e -> updateSelectedTestcase());
+        exportTestcaseBtn.addActionListener(e -> exportTestcasesToFile());
 
         saveApiKeyBtn.addActionListener(e -> {
             String key = new String(apiKeyField.getPassword()).trim();
@@ -275,7 +313,6 @@ public class GUI extends JFrame {
         right.add(analyzeBtn);
         runAllBtn = btn("Chạy tất cả", new Color(139, 92, 246));
         right.add(runAllBtn);
-        right.add(btn("Lưu Database", new Color(189, 66, 1)));
         bar.add(right, BorderLayout.EAST);
         return bar;
     }
@@ -395,7 +432,8 @@ public class GUI extends JFrame {
         toolbar.add(addTestcaseBtn);
         updateTestcaseBtn = btn("Lưu sửa", new Color(15, 118, 110));
         toolbar.add(updateTestcaseBtn);
-        toolbar.add(btn("Xuất file", C_GREEN));
+        exportTestcaseBtn = btn("Xuất file", C_GREEN);
+        toolbar.add(exportTestcaseBtn);
         toolbar.add(btn("Xóa", C_RED));
         panel.add(toolbar, BorderLayout.NORTH);
 
@@ -488,11 +526,13 @@ public class GUI extends JFrame {
         }
         Services.Testcase tc = new Services.Testcase();
         tc.type = (String) testcaseTypeCombo.getSelectedItem();
+        tc.strength = "MEDIUM";
         tc.input = input;
         tc.output = output;
         testcases.add(tc);
+        clearStrengthEvidence();
         int index = testcases.size();
-        tableModel.addRow(new Object[]{index, tc.type, "Thủ công", "-"});
+        tableModel.addRow(new Object[]{index, tc.type + " / " + tc.strength, "Thủ công", "-"});
         testcaseTable.setRowSelectionInterval(index - 1, index - 1);
         statusLabel.setText("Đã thêm testcase thủ công");
         statusLabel.setForeground(C_GREEN);
@@ -513,6 +553,7 @@ public class GUI extends JFrame {
         Services.Testcase tc = testcases.get(row);
         tc.input = input;
         tc.output = output;
+        clearStrengthEvidence();
         tableModel.setValueAt("Đã sửa", row, 2);
         statusLabel.setText("Đã cập nhật testcase");
         statusLabel.setForeground(C_GREEN);
@@ -524,15 +565,16 @@ public class GUI extends JFrame {
             return;
         }
         String lang = (String) langCombo.getSelectedItem();
-        if (lang == null || !lang.startsWith("C++")) {
-            JOptionPane.showMessageDialog(this, "Hiện tại chỉ hỗ trợ chạy C++.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+        if (lang == null || lang.isBlank()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng chọn ngôn ngữ trước khi chạy.", "Thông báo", JOptionPane.WARNING_MESSAGE);
             return;
         }
         String code = codeArea.getText().trim();
         if (code.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Vui lòng nhập code C++ trước khi chạy.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Vui lòng nhập code " + lang + " trước khi chạy.", "Thông báo", JOptionPane.WARNING_MESSAGE);
             return;
         }
+        final String currentCodeType = normalizeCodeTypeKey((String) codeTypeCombo.getSelectedItem());
 
         runTestcaseBtn.setEnabled(false);
         if (runAllBtn != null) runAllBtn.setEnabled(false);
@@ -540,22 +582,22 @@ public class GUI extends JFrame {
         statusLabel.setForeground(C_YELLOW);
         progressBar.setIndeterminate(true);
         tabs.setSelectedIndex(2);
-        compileArea.setText("Đang chạy testcases...\n");
+        compileArea.setText("Đang chạy testcases cho " + lang + "...\n");
 
-        new SwingWorker<List<CodeRunner.RunResult>, Void>() {
+        new SwingWorker<List<RunResult>, Void>() {
             @Override
-            protected List<CodeRunner.RunResult> doInBackground() {
-                return codeRunner.runCppTestcases(code, testcases);
+            protected List<RunResult> doInBackground() {
+                return codeRunner.runTestcases(lang, code, testcases);
             }
 
             @Override
             protected void done() {
                 try {
-                    List<CodeRunner.RunResult> results = get();
+                    List<RunResult> results = get();
                     StringBuilder log = new StringBuilder();
                     int pass = 0;
                     for (int i = 0; i < results.size(); i++) {
-                        CodeRunner.RunResult rs = results.get(i);
+                        RunResult rs = results.get(i);
                         Services.Testcase tc = testcases.get(i);
                         String expected = normalizeOutput(tc.output);
                         String actual = normalizeOutput(rs.stdout);
@@ -584,6 +626,10 @@ public class GUI extends JFrame {
                         }
                         log.append("---\n");
                     }
+                    updateStrengthEvidence(currentCodeType, pass, results.size());
+                    log.append("\n=== ĐÁNH GIÁ ĐỘ MẠNH TESTCASE ===\n")
+                            .append(buildStrengthReport())
+                            .append("\n");
                     compileArea.setText(log.toString());
                     statusLabel.setText("Đã chạy xong " + pass + "/" + results.size() + " testcase");
                     statusLabel.setForeground(pass == results.size() ? C_GREEN : C_YELLOW);
@@ -601,9 +647,122 @@ public class GUI extends JFrame {
         }.execute();
     }
 
+    private void exportTestcasesToFile() {
+        if (testcases == null || testcases.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Chưa có testcase để xuất.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Chọn thư mục để xuất testcase");
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setAcceptAllFileFilterUsed(false);
+        int option = chooser.showOpenDialog(this);
+        if (option != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+
+        File selectedDirectory = chooser.getSelectedFile();
+        if (selectedDirectory == null || !selectedDirectory.exists()) {
+            JOptionPane.showMessageDialog(this, "Thư mục không hợp lệ.", "Lỗi", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        Path exportRoot = selectedDirectory.toPath().resolve("testcases_export");
+        int suffix = 1;
+        while (Files.exists(exportRoot)) {
+            suffix++;
+            exportRoot = selectedDirectory.toPath().resolve("testcases_export_" + suffix);
+        }
+
+        try {
+            Files.createDirectories(exportRoot);
+            for (int i = 0; i < testcases.size(); i++) {
+                Services.Testcase tc = testcases.get(i);
+                Path testcaseFolder = exportRoot.resolve(String.format("testcase_%03d", i + 1));
+                Files.createDirectories(testcaseFolder);
+                Files.writeString(testcaseFolder.resolve("input.txt"), tc.input == null ? "" : tc.input);
+                Files.writeString(testcaseFolder.resolve("output.txt"), tc.output == null ? "" : tc.output);
+            }
+            statusLabel.setText("Đã xuất " + testcases.size() + " testcase vào: " + exportRoot.getFileName());
+            statusLabel.setForeground(C_GREEN);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Không thể ghi file:\n" + ex.getMessage(), "Lỗi", JOptionPane.ERROR_MESSAGE);
+            statusLabel.setText("Lỗi xuất testcase");
+            statusLabel.setForeground(C_RED);
+        }
+    }
+
     private String normalizeOutput(String text) {
         if (text == null) return "";
         return text.replace("\r\n", "\n").trim();
+    }
+
+    private void clearStrengthEvidence() {
+        strengthRuns.clear();
+    }
+
+    private void updateStrengthEvidence(String codeType, int pass, int total) {
+        if (codeType == null || codeType.isBlank() || total <= 0) return;
+        strengthRuns.put(codeType, new StrengthRunSummary(pass, total));
+    }
+
+    private String buildStrengthReport() {
+        StrengthRunSummary ac = strengthRuns.get("AC");
+        StrengthRunSummary wa = strengthRuns.get("WA");
+        StrengthRunSummary tle = strengthRuns.get("TLE");
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Lần chạy đã có: ").append(formatRunSummary("AC", ac))
+          .append(", ").append(formatRunSummary("WA", wa))
+          .append(", ").append(formatRunSummary("TLE", tle)).append(".\n");
+
+        if (ac == null) {
+            sb.append("Kết luận: Chưa đủ dữ liệu. Hãy chạy bộ code AC trước.");
+            return sb.toString();
+        }
+        if (ac.passCount < ac.totalCount) {
+            sb.append("Kết luận: Chưa thể chấm độ mạnh vì code AC chưa qua hết testcase.");
+            return sb.toString();
+        }
+
+        boolean hasNegative = wa != null || tle != null;
+        int killedCount = 0;
+        if (wa != null && wa.passCount < wa.totalCount) killedCount++;
+        if (tle != null && tle.passCount < tle.totalCount) killedCount++;
+
+        if (!hasNegative) {
+            sb.append("Kết luận: Chưa đủ dữ liệu. Hãy chạy thêm WA hoặc TLE để đo độ mạnh.");
+        } else if (killedCount == 0) {
+            sb.append("Kết luận: Testcase CHƯA đủ mạnh (WA/TLE vẫn qua toàn bộ).");
+        } else if (killedCount == 1) {
+            sb.append("Kết luận: Testcase tạm đủ mạnh (đã loại được 1 nhóm code sai/chậm).");
+        } else {
+            sb.append("Kết luận: Testcase đủ mạnh (AC qua hết, cả WA và TLE đều bị loại).");
+        }
+        return sb.toString();
+    }
+
+    private String formatRunSummary(String codeType, StrengthRunSummary summary) {
+        if (summary == null) return codeType + " chưa chạy";
+        return codeType + " " + summary.passCount + "/" + summary.totalCount;
+    }
+
+    private String normalizeCodeTypeKey(String rawType) {
+        if (rawType == null) return "";
+        if (rawType.startsWith("AC")) return "AC";
+        if (rawType.startsWith("WA")) return "WA";
+        if (rawType.startsWith("TLE")) return "TLE";
+        return rawType.trim();
+    }
+
+    private static class StrengthRunSummary {
+        private final int passCount;
+        private final int totalCount;
+
+        private StrengthRunSummary(int passCount, int totalCount) {
+            this.passCount = passCount;
+            this.totalCount = totalCount;
+        }
     }
 
     private JPanel buildCodeTab() {
