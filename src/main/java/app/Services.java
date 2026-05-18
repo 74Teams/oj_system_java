@@ -17,7 +17,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class Services {
-    private static final String MODEL_ID = "gemini-3-flash-preview";
+    private static final String MODEL_ID = "gemini-2.5-flash";
     private static final int DEFAULT_MAX_OUTPUT_TOKENS = 4096;
     private static final int MAX_CODE_OUTPUT_TOKENS = 12288;
     private static final int MAX_CODE_ATTEMPTS = 2;
@@ -113,15 +113,27 @@ public class Services {
             throw new RuntimeException("Không thể sinh testcase hợp lệ từ phản hồi AI.");
         }
         List<Testcase> balanced = selectBalancedTestcases(collected, count);
-        if (balanced.size() < count) {
-            throw new RuntimeException("Không đủ testcase. Đã sinh " + collected.size() + "/" + count + ". Vui lòng thử lại.");
+        if (balanced.size() < count && !collected.isEmpty()) {
+            List<String> latestMissingStrengths = getMissingStrengths(balanced, count);
+            int retryForMissing = 0;
+            while (retryForMissing < MAX_TESTCASE_NO_PROGRESS_STREAK && (balanced.size() < count || !latestMissingStrengths.isEmpty())) {
+                int requestCount = Math.max(count - balanced.size(), Math.max(latestMissingStrengths.size(), MIN_TESTCASE_BATCH_SIZE / 2));
+                String prompt = buildTestcaseContinuePrompt(problemText, requestCount, type, analysis, collected, latestMissingStrengths);
+                String rawText = generateContentText(prompt, DEFAULT_MAX_OUTPUT_TOKENS);
+                int before = collected.size();
+                mergeTestcases(collected, parseTestcases(rawText), seen, poolLimit);
+                if (collected.size() == before) {
+                    retryForMissing++;
+                } else {
+                    retryForMissing = 0;
+                }
+                balanced = selectBalancedTestcases(collected, count);
+                latestMissingStrengths = getMissingStrengths(balanced, count);
+            }
         }
-        List<String> missingAfterBalance = getMissingStrengths(balanced, count);
-        if (!missingAfterBalance.isEmpty()) {
-            throw new RuntimeException("Chưa đủ mức độ testcase (yếu/vừa/mạnh). Thiếu: " + String.join(", ", missingAfterBalance) + ". Vui lòng thử lại.");
-        }
-        testcaseCache.put(cacheKey, new ArrayList<>(balanced));
-        return balanced;
+        List<Testcase> exactCount = ensureExactCountTestcases(balanced, collected, count);
+        testcaseCache.put(cacheKey, new ArrayList<>(exactCount));
+        return exactCount;
     }
 
     public String FileToText(File file){
@@ -460,6 +472,50 @@ public class Services {
             return new ArrayList<>(selected.subList(0, count));
         }
         return selected;
+    }
+
+    private List<Testcase> ensureExactCountTestcases(List<Testcase> selected, List<Testcase> pool, int count) {
+        if (count <= 0) return new ArrayList<>();
+        List<Testcase> exact = new ArrayList<>(selected == null ? List.of() : selected);
+        if (exact.size() >= count) {
+            return new ArrayList<>(exact.subList(0, count));
+        }
+
+        Set<String> used = new HashSet<>();
+        for (Testcase tc : exact) {
+            used.add(normalizeTestcaseKey(tc));
+        }
+
+        if (pool != null) {
+            for (Testcase tc : pool) {
+                if (exact.size() >= count) break;
+                String key = normalizeTestcaseKey(tc);
+                if (used.add(key)) {
+                    exact.add(tc);
+                }
+            }
+        }
+
+        if (exact.isEmpty()) {
+            throw new RuntimeException("Không thể sinh testcase hợp lệ từ phản hồi AI.");
+        }
+
+        for (int i = 0; exact.size() < count; i++) {
+            Testcase seed = exact.get(i % exact.size());
+            exact.add(cloneTestcase(seed));
+        }
+        return exact;
+    }
+
+    private Testcase cloneTestcase(Testcase source) {
+        Testcase clone = new Testcase();
+        if (source == null) return clone;
+        clone.type = source.type;
+        clone.strength = source.strength;
+        clone.input = source.input;
+        clone.output = source.output;
+        clone.note = source.note;
+        return clone;
     }
 
     private List<String> getMissingStrengths(List<Testcase> cases, int requestedCount) {

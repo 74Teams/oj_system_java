@@ -54,6 +54,7 @@ public class GUI extends JFrame {
     private JButton analyzeBtn;
     private JButton uploadBtn;
     private JButton generateCodeBtn;
+    private JButton compileBtn;
     private JButton genTestcaseBtn;
     private JButton runTestcaseBtn;
     private JButton runAllBtn;
@@ -257,6 +258,9 @@ public class GUI extends JFrame {
         if (runAllBtn != null) {
             runAllBtn.addActionListener(e -> runCurrentTestcases());
         }
+        if (compileBtn != null) {
+            compileBtn.addActionListener(e -> compileAndCheckCode());
+        }
 
         addTestcaseBtn.addActionListener(e -> addManualTestcase());
         updateTestcaseBtn.addActionListener(e -> updateSelectedTestcase());
@@ -406,7 +410,6 @@ public class GUI extends JFrame {
         analysisArea.setFont(F_NORMAL);
         analysisArea.setEditable(false);
         analysisArea.setLineWrap(true);
-        analysisArea.setWrapStyleWord(true);
         panel.add(scrollPane(analysisArea), BorderLayout.CENTER);
 
         return panel;
@@ -647,6 +650,71 @@ public class GUI extends JFrame {
         }.execute();
     }
 
+    private void compileAndCheckCode() {
+        String lang = (String) langCombo.getSelectedItem();
+        if (lang == null || lang.isBlank()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng chọn ngôn ngữ trước khi biên dịch.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String code = codeArea.getText().trim();
+        if (code.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng nhập code " + lang + " trước khi biên dịch.", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String quickInput = inputArea.getText();
+
+        compileBtn.setEnabled(false);
+        statusLabel.setText("Đang biên dịch và chạy kiểm tra...");
+        statusLabel.setForeground(C_YELLOW);
+        progressBar.setIndeterminate(true);
+        tabs.setSelectedIndex(2);
+        compileArea.setText("Đang biên dịch " + lang + "...\n");
+
+        new SwingWorker<RunResult, Void>() {
+            @Override
+            protected RunResult doInBackground() {
+                Services.Testcase quickCase = new Services.Testcase();
+                quickCase.input = quickInput == null ? "" : quickInput;
+                List<RunResult> results = codeRunner.runTestcases(lang, code, List.of(quickCase));
+                if (results.isEmpty()) {
+                    throw new RuntimeException("Không nhận được kết quả chạy kiểm tra.");
+                }
+                return results.get(0);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    RunResult rs = get();
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("Biên dịch thành công.\n");
+                    sb.append("Thời gian chạy: ").append(rs.durationMs).append(" ms\n");
+                    sb.append("Exit code: ").append(rs.exitCode).append("\n\n");
+                    sb.append("=== STDOUT ===\n").append(rs.stdout == null ? "" : rs.stdout).append("\n");
+                    if (rs.stderr != null && !rs.stderr.isBlank()) {
+                        sb.append("=== STDERR ===\n").append(rs.stderr).append("\n");
+                    }
+                    compileArea.setText(sb.toString());
+                    if (rs.exitCode == 0) {
+                        statusLabel.setText("Biên dịch thành công, chạy không lỗi");
+                        statusLabel.setForeground(C_GREEN);
+                    } else {
+                        statusLabel.setText("Biên dịch thành công nhưng chạy bị lỗi");
+                        statusLabel.setForeground(C_RED);
+                    }
+                } catch (Exception ex) {
+                    compileArea.setText("Lỗi biên dịch/chạy kiểm tra:\n" + ex.getMessage());
+                    statusLabel.setText("Biên dịch hoặc chạy kiểm tra thất bại");
+                    statusLabel.setForeground(C_RED);
+                } finally {
+                    compileBtn.setEnabled(true);
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(100);
+                }
+            }
+        }.execute();
+    }
+
     private void exportTestcasesToFile() {
         if (testcases == null || testcases.isEmpty()) {
             JOptionPane.showMessageDialog(this, "Chưa có testcase để xuất.", "Thông báo", JOptionPane.WARNING_MESSAGE);
@@ -777,7 +845,8 @@ public class GUI extends JFrame {
         toolbar.add(codeTypeCombo);
         generateCodeBtn = btn("Sinh Code AI", C_PRIMARY);
         toolbar.add(generateCodeBtn);
-        toolbar.add(btn("Biên dịch", new Color(234, 88, 12)));
+        compileBtn = btn("Biên dịch", new Color(234, 88, 12));
+        toolbar.add(compileBtn);
         runTestcaseBtn = btn("Chạy TC", C_GREEN);
         toolbar.add(runTestcaseBtn);
         panel.add(toolbar, BorderLayout.NORTH);
